@@ -30,7 +30,7 @@ class TableFill:
     seconds: float
 
 
-# fill every table, parents first, then refresh the planner's statistics
+# fill every table, parents first, then commit and VACUUM ANALYZE so it's ready to measure
 def seed_data(
     conn: psycopg.Connection,
     tables: dict[str, Table],
@@ -60,7 +60,12 @@ def seed_data(
         inserted = fill_table(conn, tables[name], counts)
         fills.append(TableFill(name, counts[name], inserted, time.perf_counter() - start))
 
-    conn.execute(sql.SQL("ANALYZE {}").format(sql.SQL(", ").join(map(sql.Identifier, tables))))
+    # VACUUM marks the new rows as visible to everyone, like on a database that's been running
+    # a while (otherwise index-only scans can't happen), and ANALYZE refreshes the planner's
+    # statistics. VACUUM can't run inside a transaction, so commit first and switch to autocommit.
+    conn.commit()
+    conn.autocommit = True
+    conn.execute(sql.SQL("VACUUM ANALYZE {}").format(sql.SQL(", ").join(map(sql.Identifier, tables))))
     return fills
 
 

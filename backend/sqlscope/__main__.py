@@ -6,12 +6,15 @@ from pathlib import Path
 import psycopg
 
 from sqlscope import sandbox, validate
-from sqlscope.report import print_fill, print_schema, print_stats, print_workload
+from sqlscope.measure import measure_workload
+from sqlscope.report import print_fill, print_measurements, print_schema, print_stats, print_workload
 from sqlscope.schema import read_schema, read_stats
 from sqlscope.seed import DEFAULT_ROWS, SeedError, seed_data
 from sqlscope.workload import build_workload
 
-def run(schema_path: Path, keep: bool, rows: int, table_rows: dict[str, int], show_schema: bool) -> None:
+def run(
+    schema_path: Path, keep: bool, rows: int, table_rows: dict[str, int], show_schema: bool, show_workload: bool
+) -> None:
     # validate before creating anything, so bad input fails fast
     try:
         statements = validate.validate_schema(schema_path.read_text())
@@ -37,12 +40,15 @@ def run(schema_path: Path, keep: bool, rows: int, table_rows: dict[str, int], sh
                 raise SystemExit(f"Can't generate data: {e}")
             stats = read_stats(conn)
             queries = build_workload(tables, {fill.table: fill.requested for fill in fills})
+            measurements = measure_workload(conn, queries)
         print(f"Loaded {len(tables)} tables\n")
         if show_schema:
             print_schema(tables)
         print_fill(fills)
         print_stats(tables, stats)
-        print_workload(queries)
+        if show_workload:
+            print_workload(queries)
+        print_measurements(measurements)
     finally:
         if keep:
             print(f"Kept. Inspect with: docker compose exec db psql -U postgres -d {sb.name}")
@@ -74,12 +80,13 @@ def main() -> None:
     run_cmd.add_argument("--table-rows", type=table_rows_arg, action="append", default=[], metavar="TABLE=N",
                          help="row count for one table, can be repeated")
     run_cmd.add_argument("--show-schema", action="store_true", help="print the schema as postgres read it")
+    run_cmd.add_argument("--show-workload", action="store_true", help="print the SQL of every generated query")
 
     commands.add_parser("cleanup", help="drop all leftover sandboxes")
 
     args = parser.parse_args()
     if args.command == "run":
-        run(args.schema, args.keep, args.rows, dict(args.table_rows), args.show_schema)
+        run(args.schema, args.keep, args.rows, dict(args.table_rows), args.show_schema, args.show_workload)
     elif args.command == "cleanup":
         dropped = sandbox.drop_all()
         print(f"Dropped {len(dropped)} sandbox(es)")

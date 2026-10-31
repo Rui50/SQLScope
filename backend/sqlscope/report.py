@@ -3,7 +3,9 @@
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table as RichTable
+from rich.text import Text
 
+from sqlscope.measure import Measurement
 from sqlscope.schema import ColumnStats, Table
 from sqlscope.seed import TableFill
 from sqlscope.workload import Query
@@ -93,5 +95,25 @@ def print_workload(queries: list[Query]) -> None:
     for query in queries:
         text = query.sql.as_string().replace("%s", "$1")
         out.add_row(escape(query.name), escape(text))
+
+    console.print(out)
+
+
+# one row per query: plan, rows, median time and pages; Seq Scans in red, they're the index candidates
+def print_measurements(measurements: list[Measurement]) -> None:
+    out = RichTable(title="baseline", title_justify="left", show_edge=False)
+    out.add_column("query", no_wrap=True)
+    out.add_column("plan")
+    out.add_column("rows", justify="right")
+    out.add_column("time", justify="right")
+    out.add_column("pages", justify="right")
+
+    for m in measurements:
+        if m.skipped:
+            out.add_row(escape(m.query.name), Text(f"skipped: {m.skipped}", style="dim"), "", "", "")
+            continue
+        plan = " | ".join(m.plans)
+        style = "red" if "Seq Scan" in plan else ""
+        out.add_row(escape(m.query.name), Text(plan, style=style), f"{m.rows:,}", f"{m.ms:.2f} ms", f"{m.pages:,}")
 
     console.print(out)
