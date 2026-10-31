@@ -1,0 +1,3 @@
+psycopg[binary]==3.3.6
+pglast==8.7
+rich==15.0.0
