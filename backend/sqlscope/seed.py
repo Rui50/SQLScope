@@ -165,7 +165,7 @@ def value_sql(table: Table, col: Column, counts: dict[str, int]) -> sql.Composab
 
     # a column name with realistic values in fake_data.py (users.full_name, users.country)
     elif col.name in NAME_VALUES:
-        expr = sql.SQL(NAME_VALUES[col.name])
+        expr = sql.SQL(NAME_VALUES[col.name]).format(rows=counts[table.name])
 
     # any other number, within its CHECK bounds (reviews.rating, products.price)
     elif base in NUMBER_TYPES:
@@ -173,7 +173,7 @@ def value_sql(table: Table, col: Column, counts: dict[str, int]) -> sql.Composab
 
     # any other type with a simple random value in fake_data.py (text, boolean, timestamps...)
     elif base in TYPE_VALUES:
-        expr = sql.SQL(TYPE_VALUES[base])
+        expr = sql.SQL(TYPE_VALUES[base]).format(rows=counts[table.name])
 
     # unknown type, but empty is allowed
     elif col.nullable:

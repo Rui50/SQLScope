@@ -1,15 +1,16 @@
 """ fake data: what realistic values look like, as SQL expressions for each row g """
 
-# types that only need a random value of their kind
-# (text gets cut to fit varchar(n) by the final cast, dates are within the last 2 years)
+# types that only need a random value of their kind. Text gets cut to fit varchar(n) by the final
+# cast. Dates follow the row order like in a real database, where rows are added over time:
+# row 1 is 2 years old, the last row is from now ({rows} is the table's row count)
 TYPE_VALUES = {
     "text": "md5(random()::text)",
     "character varying": "md5(random()::text)",
     "character": "md5(random()::text)",
     "boolean": "random() < 0.5",
-    "timestamp with time zone": "now() - random() * interval '730 days'",
-    "timestamp without time zone": "now() - random() * interval '730 days'",
-    "date": "current_date - floor(random() * 730)::int",
+    "timestamp with time zone": "now() - (1 - g::float / {rows}) * interval '730 days'",
+    "timestamp without time zone": "now() - (1 - g::float / {rows}) * interval '730 days'",
+    "date": "current_date - floor((1 - g::float / {rows}) * 730)::int",
     "time with time zone": "time '00:00' + random() * interval '24 hours'",
     "time without time zone": "time '00:00' + random() * interval '24 hours'",
     "interval": "random() * interval '30 days'",
@@ -21,7 +22,8 @@ TYPE_VALUES = {
 # realistic values for common column names (unique columns keep their own rule)
 FIRST_NAME = "(ARRAY['Ana', 'Ben', 'Chloe', 'David', 'Emma', 'Hugo', 'Ines', 'Liam', 'Maria', 'Noah'])[1 + floor(random() * 10)::int]"
 LAST_NAME = "(ARRAY['Silva', 'Smith', 'Garcia', 'Muller', 'Rossi', 'Kim', 'Costa', 'Brown', 'Martin', 'Lee'])[1 + floor(random() * 10)::int]"
-RECENT = "now() - random() ^ 2 * interval '730 days'"  # last 2 years, mostly recent
+# follows the row order too, with more rows in recent months (a growing app)
+RECENT = "now() - (1 - g::float / {rows}) ^ 2 * interval '730 days'"
 REVIEW = "(ARRAY['Great, would buy again.', 'Works fine.', 'Not what I expected.', 'Fast delivery.', 'Broke after a week.', 'Exactly as described.'])[1 + floor(random() * 6)::int]"
 NAME_VALUES = {
     "first_name": FIRST_NAME,

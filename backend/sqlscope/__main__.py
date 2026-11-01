@@ -6,8 +6,12 @@ from pathlib import Path
 import psycopg
 
 from sqlscope import sandbox, validate
-from sqlscope.measure import measure_workload
-from sqlscope.report import print_fill, print_measurements, print_schema, print_stats, print_workload
+from sqlscope.measure import measure_workload, sample_workload
+from sqlscope.recommend import build_indexes, choose_indexes, find_candidates, screen_candidates
+from sqlscope.report import (
+    print_comparison, print_fill, print_indexes, print_measurements, print_schema, print_screening, print_stats,
+    print_workload,
+)
 from sqlscope.schema import read_schema, read_stats
 from sqlscope.seed import DEFAULT_ROWS, SeedError, seed_data
 from sqlscope.workload import build_workload
@@ -40,7 +44,12 @@ def run(
                 raise SystemExit(f"Can't generate data: {e}")
             stats = read_stats(conn)
             queries = build_workload(tables, {fill.table: fill.requested for fill in fills})
-            measurements = measure_workload(conn, queries)
+            samples = sample_workload(conn, queries)
+            before = measure_workload(conn, queries, samples)
+            screenings = screen_candidates(conn, find_candidates(queries, tables), samples)
+            best = choose_indexes(screenings)
+            built = build_indexes(conn, best)
+            after = measure_workload(conn, queries, samples)
         print(f"Loaded {len(tables)} tables\n")
         if show_schema:
             print_schema(tables)
@@ -48,7 +57,10 @@ def run(
         print_stats(tables, stats)
         if show_workload:
             print_workload(queries)
-        print_measurements(measurements)
+        print_measurements(before)
+        print_screening(screenings)
+        print_indexes(built, best)
+        print_comparison(before, after, best)
     finally:
         if keep:
             print(f"Kept. Inspect with: docker compose exec db psql -U postgres -d {sb.name}")

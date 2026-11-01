@@ -48,6 +48,7 @@ class ColumnStats:
     distinct: float            # estimated number of different values
     common_values: list[str]   # most common values, most frequent first
     common_freqs: list[float]  # share of rows for each of those
+    correlation: float | None  # 1 = values follow the order rows are stored on disk, 0 = scattered
 
 
 # All four queries read Postgres's system catalog (its own description of what exists)
@@ -191,7 +192,7 @@ def read_schema(conn: psycopg.Connection) -> dict[str, Table]:
 
 # What the planner believes about each column's data, collected by ANALYZE.
 # One row per column:
-#   (table, column, null_frac, distinct, common_values, common_freqs)
+#   (table, column, null_frac, distinct, common_values, common_freqs, correlation)
 STATS = """
 SELECT
     s.tablename,
@@ -203,7 +204,8 @@ SELECT
     CASE WHEN s.n_distinct < 0 THEN -s.n_distinct * c.reltuples ELSE s.n_distinct END,
 
     s.most_common_vals::text::text[],            -- stored as "anyarray", so go through text
-    s.most_common_freqs                          -- share of rows for each common value
+    s.most_common_freqs,                         -- share of rows for each common value
+    s.correlation                                -- -1..1, how well values follow the order on disk
 
 FROM pg_stats s                                  -- one row per analyzed column
 JOIN pg_class c                                  -- the table, for its row count
@@ -214,6 +216,6 @@ WHERE s.schemaname = 'public'
 # the planner's statistics for every column, keyed by (table, column)
 def read_stats(conn: psycopg.Connection) -> dict[tuple[str, str], ColumnStats]:
     stats = {}
-    for table, column, null_frac, distinct, values, freqs in conn.execute(STATS):
-        stats[(table, column)] = ColumnStats(null_frac, distinct, values or [], freqs or [])
+    for table, column, null_frac, distinct, values, freqs, correlation in conn.execute(STATS):
+        stats[(table, column)] = ColumnStats(null_frac, distinct, values or [], freqs or [], correlation)
     return stats
