@@ -34,7 +34,8 @@ def measure_workload(conn: psycopg.Connection, queries: list[Query], samples: di
 
 
 # run the query once to warm up, then once per sampled value, keep the medians
-def measure_query(conn: psycopg.Connection, query: Query, params: list | None) -> Measurement:
+# no_seqscan forbids Seq Scans for these runs, to see what using an index would have cost
+def measure_query(conn: psycopg.Connection, query: Query, params: list | None, no_seqscan: bool = False) -> Measurement:
     if params is None:
         return Measurement(query, skipped="no values to sample")
 
@@ -42,8 +43,8 @@ def measure_query(conn: psycopg.Connection, query: Query, params: list | None) -
     # writes the values into the SQL, so the planner sees them
     cursor = psycopg.ClientCursor(conn) 
     # warm-up: loads the pages into memory, not counted
-    run_once(conn, cursor, explain, params[0]) 
-    results = [run_once(conn, cursor, explain, p) for p in params]
+    run_once(conn, cursor, explain, params[0], no_seqscan) 
+    results = [run_once(conn, cursor, explain, p, no_seqscan) for p in params]
 
     # which plan each value got: a busy user can get a different plan than an average one
     plans: dict[str, list] = {}
@@ -76,8 +77,14 @@ def sample_params(conn: psycopg.Connection, query: Query) -> list | None:
 
 
 # run EXPLAIN ANALYZE once inside a transaction that's always rolled back, so writes leave no trace
-def run_once(conn: psycopg.Connection, cursor: psycopg.ClientCursor, explain: sql.Composable, params: tuple | None) -> dict:
+# (and SET LOCAL only lasts until then)
+def run_once(
+    conn: psycopg.Connection, cursor: psycopg.ClientCursor, explain: sql.Composable, params: tuple | None,
+    no_seqscan: bool = False,
+) -> dict:
     with conn.transaction(force_rollback=True):
+        if no_seqscan:
+            cursor.execute("SET LOCAL enable_seqscan = off")
         return cursor.execute(explain, params).fetchone()[0][0]
 
 

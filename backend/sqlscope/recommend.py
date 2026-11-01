@@ -8,12 +8,14 @@ from pglast import ast, parse_sql
 from pglast.enums import A_Expr_Kind, BoolExprType
 from psycopg import sql
 
-from sqlscope.measure import plan_summary
+from sqlscope.measure import Measurement, measure_query, plan_summary
 from sqlscope.schema import Table
 from sqlscope.workload import Query
 
 RANGE_OPS = {"<", "<=", ">", ">="}
 MIN_GAIN = 0.3  # the planner must expect at least 30% lower cost, or an index isn't worth its upkeep
+KEEP_GAIN = 5  # an index that makes some query this many times faster is a clear win
+MARGINAL_GAIN = 1.5  # below this it isn't worth its upkeep at all
 
 
 @dataclass
@@ -44,6 +46,29 @@ class BuiltIndex:
     candidate: Candidate
     name: str
     size: int  # bytes on disk
+
+
+@dataclass
+class Forced:
+    index: BuiltIndex
+    normal: Measurement  # what the planner chose
+    forced: Measurement  # the same query with Seq Scans switched off
+
+
+@dataclass
+class Verdict:
+    index: BuiltIndex
+    verdict: str                     # keep, marginal or drop
+    helps: list[tuple[str, float]]   # queries whose plan now uses it, and how many times faster
+    hurts: list[tuple[str, float]]   # ...and those that got slower, how many times slower
+    writes: list[tuple[str, int, int]]  # inserts/updates on its table: query, pages before, after
+    shared_with: int                 # other new indexes on the same table, sharing that write cost
+
+
+@dataclass
+class Redundant:
+    name: str        # the existing index
+    covered_by: str  # the new index that starts with the same columns
 
 
 # candidate indexes for each single-table SELECT: its equality columns, then one range or sort column
@@ -155,9 +180,10 @@ def explain_plan(cursor: psycopg.ClientCursor, query: Query, params: tuple | Non
     return cursor.execute(explain, params).fetchone()[0][0]["Plan"]
 
 
-# for each query, the candidate the planner liked best: the lowest estimated cost, and when two are
-# within 10% of each other the one with fewer columns (smaller, cheaper to keep up to date).
-# Candidates it never used, or that save less than MIN_GAIN, don't count.
+# for each query, the candidate the planner liked best: the lowest estimated cost. When two are within
+# 10% of each other, the one that also covers the query's ORDER BY (it keeps working for busy values
+# like user 1, which the sampled values can miss), else the one with fewer columns (smaller, cheaper
+# to keep up to date). Candidates it never used, or that save less than MIN_GAIN, don't count.
 # Returns query name -> (candidate, its estimate)
 def choose_indexes(screenings: list[Screening]) -> dict[str, tuple[Candidate, Estimate]]:
     best: dict[str, tuple[Candidate, Estimate]] = {}
@@ -174,7 +200,13 @@ def choose_indexes(screenings: list[Screening]) -> dict[str, tuple[Candidate, Es
             current_candidate, current_estimate = best[name]
             close = abs(estimate.cost_after - current_estimate.cost_after) <= 0.1 * current_estimate.cost_after
             if close:
-                better = len(candidate.columns) < len(current_candidate.columns)
+                sort = read_query(estimate.query)[3]
+                covers_sort = bool(sort) and sort[0] in candidate.columns
+                current_covers_sort = bool(sort) and sort[0] in current_candidate.columns
+                if covers_sort != current_covers_sort:
+                    better = covers_sort
+                else:
+                    better = len(candidate.columns) < len(current_candidate.columns)
             else:
                 better = estimate.cost_after < current_estimate.cost_after
             if better:
@@ -204,3 +236,70 @@ def build_indexes(conn: psycopg.Connection, best: dict[str, tuple[Candidate, Est
     if tables:
         conn.execute(sql.SQL("ANALYZE {}").format(sql.SQL(", ").join(map(sql.Identifier, sorted(tables)))))
     return built
+
+
+# queries an index was proposed for where the planner still didn't use it once built: run them again
+# with Seq Scans switched off, to see whether the planner was right to skip the index
+def force_skipped(
+    conn: psycopg.Connection, screenings: list[Screening], built: list[BuiltIndex],
+    after: list[Measurement], samples: dict[str, list | None],
+) -> list[Forced]:
+    after_by_query = {m.query.name: m for m in after}
+    forced = []
+    for index in built:
+        screening = next(s for s in screenings if s.candidate is index.candidate)
+        for estimate in screening.estimates:
+            normal = after_by_query[estimate.query.name]
+            if normal.skipped or any(index.name in plan for plan in normal.plans):
+                continue
+            query = estimate.query
+            forced.append(Forced(index, normal, measure_query(conn, query, samples[query.name], no_seqscan=True)))
+    return forced
+
+
+# judge each built index by every query whose plan now uses it (not just the ones it was chosen
+# for) and by the writes on its table: keep, marginal or drop
+def judge_indexes(built: list[BuiltIndex], before: list[Measurement], after: list[Measurement]) -> list[Verdict]:
+    verdicts = []
+    for index in built:
+        table = index.candidate.table
+        helps, hurts, writes = [], [], []
+        for b, a in zip(before, after):
+            if b.skipped:
+                continue
+            if any(index.name in plan for plan in a.plans):
+                times = b.ms / max(a.ms, 0.001)
+                if times >= 1:
+                    helps.append((b.query.name, times))
+                else:
+                    hurts.append((b.query.name, 1 / times))
+            elif next(iter(a.plans)).startswith((f"Insert on {table}", f"Update on {table}")):
+                writes.append((b.query.name, b.pages, a.pages))
+
+        best = max((times for _, times in helps), default=1)
+        if best >= KEEP_GAIN:
+            verdict = "keep"
+        elif best >= MARGINAL_GAIN:
+            verdict = "marginal"
+        else:
+            verdict = "drop"
+        shared_with = sum(1 for other in built if other.candidate.table == table) - 1
+        verdicts.append(Verdict(index, verdict, sorted(helps, key=lambda h: -h[1]), hurts, writes, shared_with))
+    return verdicts
+
+
+# existing indexes a recommended one makes pointless: the new one starts with the same columns, so it
+# can do everything the old one did. Primary keys and unique indexes stay, they enforce rules.
+def find_redundant(tables: dict[str, Table], verdicts: list[Verdict]) -> list[Redundant]:
+    redundant = []
+    for v in verdicts:
+        if v.verdict == "drop":
+            continue  # not recommended, so it can't replace anything
+        index = v.index
+        columns = index.candidate.columns
+        for existing in tables[index.candidate.table].indexes:
+            if existing.unique or existing.primary:
+                continue
+            if len(existing.columns) < len(columns) and tuple(existing.columns) == columns[: len(existing.columns)]:
+                redundant.append(Redundant(existing.name, index.name))
+    return redundant

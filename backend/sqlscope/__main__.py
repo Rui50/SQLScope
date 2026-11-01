@@ -7,10 +7,12 @@ import psycopg
 
 from sqlscope import sandbox, validate
 from sqlscope.measure import measure_workload, sample_workload
-from sqlscope.recommend import build_indexes, choose_indexes, find_candidates, screen_candidates
+from sqlscope.recommend import (
+    build_indexes, choose_indexes, find_candidates, find_redundant, force_skipped, judge_indexes, screen_candidates,
+)
 from sqlscope.report import (
-    print_comparison, print_fill, print_indexes, print_measurements, print_schema, print_screening, print_stats,
-    print_workload,
+    print_comparison, print_fill, print_forced, print_indexes, print_measurements, print_recommendation, print_schema,
+    print_screening, print_stats, print_workload,
 )
 from sqlscope.schema import read_schema, read_stats
 from sqlscope.seed import DEFAULT_ROWS, SeedError, seed_data
@@ -50,6 +52,9 @@ def run(
             best = choose_indexes(screenings)
             built = build_indexes(conn, best)
             after = measure_workload(conn, queries, samples)
+            forced = force_skipped(conn, screenings, built, after, samples)
+            verdicts = judge_indexes(built, before, after)
+            redundant = find_redundant(tables, verdicts)
         print(f"Loaded {len(tables)} tables\n")
         if show_schema:
             print_schema(tables)
@@ -61,6 +66,8 @@ def run(
         print_screening(screenings)
         print_indexes(built, best)
         print_comparison(before, after, best)
+        print_forced(forced)
+        print_recommendation(verdicts, redundant)
     finally:
         if keep:
             print(f"Kept. Inspect with: docker compose exec db psql -U postgres -d {sb.name}")

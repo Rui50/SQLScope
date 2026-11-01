@@ -6,7 +6,7 @@ from rich.table import Table as RichTable
 from rich.text import Text
 
 from sqlscope.measure import Measurement
-from sqlscope.recommend import BuiltIndex, Candidate, Estimate, Screening
+from sqlscope.recommend import BuiltIndex, Candidate, Estimate, Forced, Redundant, Screening, Verdict
 from sqlscope.schema import ColumnStats, Table
 from sqlscope.seed import TableFill
 from sqlscope.workload import Query
@@ -213,6 +213,64 @@ def print_comparison(
 
     console.print(out)
 
+
+
+# queries where an index was there but the planner skipped it, forced to use one: was it right?
+def print_forced(forced: list[Forced]) -> None:
+    if not forced:
+        return
+    out = RichTable(title="skipped indexes, forced (Seq Scans off)", title_justify="left", show_edge=False)
+    out.add_column("query", no_wrap=True)
+    out.add_column("planner's choice")
+    out.add_column("time", justify="right")
+    out.add_column("forced")
+    out.add_column("time", justify="right")
+    out.add_column("verdict")
+
+    for f in forced:
+        if f.forced.ms >= f.normal.ms:
+            verdict = Text(f"planner was right: forced is {ratio(f.forced.ms, f.normal.ms)} slower", style="green")
+        else:
+            verdict = Text(f"planner misjudged: forced is {ratio(f.normal.ms, f.forced.ms)} faster", style="yellow")
+        out.add_row(
+            escape(f.normal.query.name), plan_text(f.normal), f"{f.normal.ms:.2f} ms",
+            plan_text(f.forced), f"{f.forced.ms:.2f} ms", verdict,
+        )
+
+    console.print(out)
+
+
+# the final advice, as SQL to run on the real database: new indexes grouped by verdict with the
+# reasons, then existing indexes that became redundant
+def print_recommendation(verdicts: list[Verdict], redundant: list[Redundant]) -> None:
+    console.print("\n[bold]recommendation[/bold]")
+    groups = [
+        ("keep", "-- create: clear wins"),
+        ("marginal", "-- create only if reads matter more than writes on the table"),
+        ("drop", "-- not worth it: no query got clearly faster"),
+    ]
+    for verdict, heading in groups:
+        group = [v for v in verdicts if v.verdict == verdict]
+        if not group:
+            continue
+        console.print(f"[dim]{heading}[/dim]")
+        for v in group:
+            columns = ", ".join(v.index.candidate.columns)
+            statement = f"CREATE INDEX {v.index.name} ON {v.index.candidate.table} ({columns});"
+            console.print(escape(statement) if verdict != "drop" else f"[dim]-- {escape(statement)}[/dim]")
+            for name, times in v.helps:
+                console.print(f"[dim]    -- {escape(name)}: {ratio(times, 1)} faster[/dim]")
+            for name, times in v.hurts:
+                console.print(f"[yellow]    -- {escape(name)}: {ratio(times, 1)} slower[/yellow]")
+            for name, pages_before, pages_after in v.writes:
+                shared = f" (shared by {v.shared_with + 1} new indexes)" if v.shared_with else ""
+                console.print(f"[dim]    -- {escape(name)}: {pages_before} → {pages_after} pages{shared}[/dim]")
+
+    if redundant:
+        console.print("[dim]-- existing indexes the new ones make redundant[/dim]")
+        for r in redundant:
+            console.print(f"DROP INDEX {escape(r.name)};")
+            console.print(f"[dim]    -- covered by {escape(r.covered_by)}[/dim]")
 
 # how many times smaller after is than before: 58×, 2.4×
 def ratio(before: float, after: float) -> str:
